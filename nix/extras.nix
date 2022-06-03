@@ -1,9 +1,9 @@
 { compiler-nix-name ? "ghc8107"}:
 
-(final: prev: 
+(final: prev:
   let pkgs = final.evalPackages; in {
   haskell-nix-extras = with final.haskell-nix-extras; with final.haskell-nix; {
-    inherit (final) haskell-nix;  
+    inherit (final) haskell-nix;
     hackage-repo-tool = hackage-tool { name = "hackage-repo-tool"; inherit compiler-nix-name; };
     nix-tools' = final.evalPackages.haskell-nix.nix-tools-unchecked.${compiler-nix-name};
     cabal-install' = final.evalPackages.haskell-nix.cabal-install-unchecked.${compiler-nix-name};
@@ -89,7 +89,7 @@
       ''
         mkdir -p $out
         hackage-to-nix $out ${repoContents}/01-index.tar ${repoUrl}
-        #find $out/hackage -name \*.nix | xargs -n1 sed -i "s,pkgs\.fetchUrl,pkgs.fetchurlWithMagicSupport,"
+
         # Workaround with discard context. FIXME: investigate and fix.
         cp ${./magic.nix} $out/default.nix
         # Bookmark repoContents, $out require it anyway
@@ -101,16 +101,27 @@
         inherit (pkgs.lib) mapAttrsToList flatten mkForce;
         args' = removeAttrs args ["extraDependencies" "extraSdists"];
         sdists = extraSdists ++ (builtins.map (each: makeSdistFromRepo { src = each; }) extraDependencies);
-        localHackage = mkExtraHackageRepo { name = "sdists-hackage"; sdists = sdists; };
-        tarballs = { extra-sdists = "${localHackage}/01-index.tar.gz"; };
-        localHackageNix = import (mkExtraHackageNix { repoContents = localHackage; });
-        localHackageModules = flatten
-          (mapAttrsToList 
-            (pname: hPkg: mapAttrsToList 
-              (ver: vPkg: 
+        haveSdists = (builtins.length sdists) > 0;
+        localHackage =
+          if haveSdists
+            then mkExtraHackageRepo { name = "sdists-hackage"; sdists = sdists; }
+            else [];
+        tarballs =
+          if haveSdists
+            then { extra-sdists = "${localHackage}/01-index.tar.gz"; }
+            else {};
+        localHackageNix =
+          if haveSdists
+            then (import (mkExtraHackageNix { repoContents = localHackage; }))
+            else {};
+        localHackageModules' = flatten
+          (mapAttrsToList
+            (pname: hPkg: mapAttrsToList
+              (ver: vPkg:
                { packages.${pname}.src = mkForce "${localHackage}/package/${pname}-${ver}.tar.gz"; }
                ) hPkg)
           localHackageNix);
+        localHackageModules = if haveSdists then localHackageModules' else [];
       in final.haskell-nix.cabalProject' (args' // {
           extra-hackages = extra-hackages ++ [ localHackageNix ];
           extra-hackage-tarballs = extra-hackage-tarballs // tarballs;

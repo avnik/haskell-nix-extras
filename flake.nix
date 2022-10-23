@@ -6,7 +6,7 @@
 
   outputs = { self, flake-utils, haskellNix }@inputs:
     let libs = rec {
-      supportedSystems = config: f: flake-utils.lib.eachSystem config.supported-systems f;
+      supportedSystems = config: f: flake-utils.lib.eachSystem config.project.supported-systems f;
       mkFlake = config: src:
         supportedSystems config (system:
           let
@@ -20,13 +20,13 @@
           };
         in flake // {
         # Built by `nix build .`
-          defaultPackage = flake.packages."${config.project-name}:exe:nau-exe";
+          defaultPackage = flake.packages."${config.project.project-name}:exe:${config.project.main-executable}";
         });
     };
     systems = flake-utils.lib.eachSystem [ "x86_64-linux" "x86_64-darwin" "aarch64-linux" "aarch64-darwin" ] (system: {
        overlays = [ 
          inputs.haskellNix.overlay
-         (import ./nix/extras.nix {})
+         (import ./nix/extras.nix {haskellNixSrc = haskellNix; })
        ];
 
        legacyPackages = import haskellNix.inputs.nixpkgs { inherit system; overlays = self.overlays.${system}; };

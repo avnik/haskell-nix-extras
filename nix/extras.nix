@@ -1,15 +1,18 @@
-{ compiler-nix-name ? "ghc8107"}:
+{ compiler-nix-name ? "ghc8107", haskellNixSrc }:
 
 (final: prev:
-  let pkgs = final.evalPackages; in {
+  {
   haskell-nix-extras = with final.haskell-nix-extras; with final.haskell-nix; {
     inherit (final) haskell-nix;
-    hackage-repo-tool = hackage-tool { name = "hackage-repo-tool"; inherit compiler-nix-name; };
-    nix-tools' = final.evalPackages.haskell-nix.nix-tools-unchecked.${compiler-nix-name};
-    cabal-install' = final.evalPackages.haskell-nix.cabal-install-unchecked.${compiler-nix-name};
+    hackage-repo-tool = evalPackages: tool' evalPackages compiler-nix-name "hackage-repo-tool" "0.1.1.3";
+
+    nix-tools' = evalPackages: [
+      evalPackages.haskell-nix.nix-tools-unchecked.${compiler-nix-name}
+      evalPackages.haskell-nix.cabal-install-unchecked.${compiler-nix-name}
+    ];
 
     # Silly debug wrapper over runCommand
-    runCommandVerbose = name: args: script: final.evalPackages.runCommand name args ''
+    runCommandVerbose = evalPackages: name: args: script: evalPackages.runCommand name args ''
       set -x
       ${script}
       set +x
@@ -19,11 +22,12 @@
         name ? "sdist",
         subPackages ? ["all"],
         preSdist ? "",
+        evalPackages,
         src
       }:
       let cleanedSource = src; in
-      runCommandVerbose name {
-        nativeBuildInputs = [ nix-tools' cabal-install' ];
+      runCommandVerbose evalPackages name {
+        nativeBuildInputs = (nix-tools' evalPackages) ++ [ evalPackages.haskell-nix.cabal-issue-8352-workaround ];
         preferLocalBuild = true;
       } ''
           tmp=$(mktemp -d)
@@ -57,32 +61,34 @@
           '') subPackages)}
         '';
 
-    snakeoil-hackage-keys = runCommandVerbose "snakeoil-hackage-keys" {}
+    snakeoil-hackage-keys = evalPackages: runCommandVerbose evalPackages "snakeoil-hackage-keys" {}
       ''
         mkdir $out
         cp -r ${./snakeoil-keys}/{mirrors,root,snapshot,timestamp,target} $out/
       '';
 
     mkExtraHackageRepo = {
+        evalPackages,
         name ? "local-hackage-repo",
         sdists ? []
-    }: runCommandVerbose "local-hackage-repo" {  nativeBuildInputs = [ hackage-repo-tool ]; preferLocalBuild = true; }
+    }: runCommandVerbose evalPackages "local-hackage-repo" {  nativeBuildInputs = [ (hackage-repo-tool evalPackages)]; preferLocalBuild = true; }
       ''
         mkdir -p $out/{package,index}
         ${final.lib.concatStrings (map (name: ''
           ln -svf ${name}/sdist/* $out/package/
         '') sdists)}
-        ${hackage-repo-tool}/bin/hackage-repo-tool --expire-root 1000 --expire-mirrors 1000 bootstrap --keys ${snakeoil-hackage-keys} --repo $out/
+        ${hackage-repo-tool evalPackages}/bin/hackage-repo-tool --expire-root 1000 --expire-mirrors 1000 bootstrap --keys ${snakeoil-hackage-keys evalPackages} --repo $out/
         rm -fr $out/*.json
       '';
     mkExtraHackageNix = {
         name ? "local-hackage-nix",
+        evalPackages,
         repoContents
     }: let
       repoUrl = "magic://"; # non-working URL, sources are overwritten with direct links on tarballs later.
-      in runCommandVerbose "local-hackage-to-nix-${name}" {
-          nativeBuildInputs = [ cabal-install' pkgs.evalPackages.curl nix-tools' ];
-          LOCALE_ARCHIVE = pkgs.lib.optionalString (pkgs.evalPackages.stdenv.buildPlatform.libc == "glibc") "${pkgs.evalPackages.glibcLocales}/lib/locale/locale-archive";
+      in runCommandVerbose evalPackages "local-hackage-to-nix-${name}" {
+          nativeBuildInputs = [ evalPackages.curl ] ++ (nix-tools' evalPackages);
+          LOCALE_ARCHIVE = evalPackages.lib.optionalString (evalPackages.stdenv.buildPlatform.libc == "glibc") "${evalPackages.glibcLocales}/lib/locale/locale-archive";
           LANG = "en_US.UTF-8";
           preferLocalBuild = true;
       }
@@ -91,20 +97,19 @@
         hackage-to-nix $out ${repoContents}/01-index.tar ${repoUrl}
 
         # Workaround with discard context. FIXME: investigate and fix.
-        cp ${./magic.nix} $out/default.nix
+        #cp ${./magic.nix} $out/default.nix
         # Bookmark repoContents, $out require it anyway
         echo ${repoContents} >$out/magic
       '';
 
-    cabalProjectWithExtras = { extraDependencies ? [], extraSdists ? [], extra-hackages ? [], extra-hackage-tarballs ? {}, modules ? [], ...}@args:
+    mkExtras = { evalPackages, extraDependencies ? [], extraSdists ? [], extra-hackages ? [], extra-hackage-tarballs ? {}, modules ? [] }:
       let
-        inherit (pkgs.lib) mapAttrsToList flatten mkForce;
-        args' = removeAttrs args ["extraDependencies" "extraSdists"];
-        sdists = extraSdists ++ (builtins.map (each: makeSdistFromRepo { src = each; }) extraDependencies);
+        inherit (evalPackages.lib) mapAttrsToList flatten mkForce;
+        sdists = extraSdists ++ (builtins.map (each: makeSdistFromRepo { inherit evalPackages; src = each; }) extraDependencies);
         haveSdists = (builtins.length sdists) > 0;
         localHackage =
           if haveSdists
-            then mkExtraHackageRepo { name = "sdists-hackage"; sdists = sdists; }
+            then mkExtraHackageRepo { inherit evalPackages; name = "sdists-hackage"; sdists = sdists; }
             else [];
         tarballs =
           if haveSdists
@@ -112,7 +117,7 @@
             else {};
         localHackageNix =
           if haveSdists
-            then (import (mkExtraHackageNix { repoContents = localHackage; }))
+            then (import (mkExtraHackageNix { inherit evalPackages; repoContents = localHackage; }))
             else {};
         localHackageModules' = flatten
           (mapAttrsToList
@@ -122,10 +127,22 @@
                ) hPkg)
           localHackageNix);
         localHackageModules = if haveSdists then localHackageModules' else [];
-      in final.haskell-nix.cabalProject' (args' // {
+      in {
           extra-hackages = extra-hackages ++ [ localHackageNix ];
           extra-hackage-tarballs = extra-hackage-tarballs // tarballs;
           modules = modules ++ localHackageModules;
+      };
+
+    dummyModule = _: { };
+    evalProjectConfig = config: final.haskell-nix.haskellLib.evalProjectModule (dummyModule) (import "${haskellNixSrc}/modules/project-common.nix") 
+      ({...}: config.project);
+
+    cabalProjectWithExtras = { evalPackages, extraDependencies ? [], extraSdists ? [], extra-hackages ? [], extra-hackage-tarballs ? {}, modules ? [], ...}@args:
+      let
+        args' = removeAttrs args ["extraDependencies" "extraSdists"];
+        extras = mkExtras { inherit extraDependencies extraSdists extra-hackages extra-hackage-tarballs evalPackages; };
+      in final.haskell-nix.cabalProject' (args' // {
+          inherit (extras) extra-hackages extra-hackage-tarballs modules;
       });
   };
 })
